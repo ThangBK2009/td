@@ -154,6 +154,8 @@ Result<NetQueryPtr> FileDownloader::start_part(Part part, int32 part_count, int6
     // Enable CDN support more aggressively for better performance
     if (streaming_offset == 0 || part.size >= 256 * 1024) {
       cdn_supported = true;
+      LOG(INFO) << "DOWNLOAD_OPTIMIZATION: CDN enabled for part " << part.id 
+                << " (streaming_offset=" << streaming_offset << ", part_size=" << part.size << ")";
     }
 #endif
     DcId dc_id = remote_.is_web() ? G()->get_webfile_dc_id() : remote_.get_dc_id();
@@ -275,9 +277,12 @@ Result<size_t> FileDownloader::process_part(Part part, NetQueryPtr net_query) {
 
   auto slice = bytes.as_slice().substr(0, part.size);
   TRY_STATUS(acquire_fd());
-  LOG(INFO) << "Receive " << slice.size() << " bytes at offset " << part.offset << " for \"" << path_ << '"';
+  LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Part " << part.id << " received " << slice.size() 
+            << " bytes at offset " << part.offset << " for \"" << path_ << '"';
   TRY_RESULT(written, fd_.pwrite(slice, part.offset));
-  LOG(INFO) << "Written " << written << " bytes";
+  LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Part " << part.id << " completed - wrote " << written 
+            << " bytes at offset " << part.offset << ", total ready: " << parts_manager_.get_ready_size() 
+            << "/" << size_ << " bytes (" << (size_ > 0 ? 100.0 * parts_manager_.get_ready_size() / size_ : 0.0) << "%)";
   // may write less than part.size, when size of downloadable file is unknown
   if (written != slice.size()) {
     return Status::Error("Failed to save file part to the file");
@@ -529,8 +534,12 @@ void FileDownloader::start_up() {
 
   auto ready_parts = bitmask.as_vector();
   auto status = parts_manager_.init(size_, size_, true, part_size, ready_parts, false, false);
-  LOG(DEBUG) << "Start downloading a file of size " << size_ << ", part size " << part_size << " and "
-             << ready_parts.size() << " ready parts: " << status;
+  LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Start downloading file of size " << size_ << " bytes, part size " 
+            << part_size << " bytes (" << (part_size / 1024) << "KB), ready parts: " << ready_parts.size() 
+            << " - " << status;
+  LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Configuration summary - MAX_PART_SIZE: " << (2048 << 10) / 1024 << "KB, "
+            << "MAX_PART_COUNT: " << 8000 << "/" << 16000 << " (regular/premium), "
+            << "Resource aggressive mode: enabled, CDN optimization: enabled";
   if (status.is_error()) {
     return on_error(std::move(status));
   }
@@ -551,6 +560,7 @@ void FileDownloader::start_up() {
     // Reduced delay for faster downloads: 0.001 instead of 0.003, start delay 0.01 instead of 0.05
     delay_dispatcher_ = create_actor<DelayDispatcher>("DelayDispatcher", 0.001, actor_shared(this, 1));
     next_delay_ = 0.01;
+    LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Using DelayDispatcher with optimized delays: base=0.001s, start=0.01s";
   }
   resource_state_.set_unit_size(parts_manager_.get_part_size());
   update_estimated_limit();
@@ -597,9 +607,10 @@ Status FileDownloader::do_loop() {
     }
     callback_->on_ok(FullLocalFileLocation(remote_.file_type_, std::move(path), 0), size, !only_check_);
 
-    LOG(INFO) << "Bad download order rate: "
+    LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Download completed! Final stats - Bad order rate: "
               << (debug_total_parts_ == 0 ? 0.0 : 100.0 * debug_bad_part_order_ / debug_total_parts_) << "% "
-              << debug_bad_part_order_ << '/' << debug_total_parts_ << ' ' << debug_bad_parts_;
+              << "(" << debug_bad_part_order_ << "/" << debug_total_parts_ << " parts out of order), "
+              << "total size: " << size << " bytes, final path: \"" << path << "\"";
     stop_flag_ = true;
     return Status::OK();
   }
@@ -608,14 +619,18 @@ Status FileDownloader::do_loop() {
     // Be more aggressive with resource usage - allow downloads even with smaller resource pools
     auto part_size = narrow_cast<int64>(parts_manager_.get_part_size());
     if (resource_state_.unused() < part_size / 2) {
-      VLOG(file_loader) << "Receive only " << resource_state_.unused() << " resource";
+      LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Resource exhausted - unused: " << resource_state_.unused() 
+                << " bytes, need: " << (part_size / 2) << " bytes (50% of part size), active parts: " 
+                << part_map_.size() << ", total resource limit: " << resource_state_.active_limit();
       break;
     }
     TRY_RESULT(part, parts_manager_.start_part());
     if (part.size == 0) {
       break;
     }
-    VLOG(file_loader) << "Start part " << tag("id", part.id) << tag("size", part.size);
+    LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Starting part " << part.id << " (size: " << part.size 
+              << " bytes, offset: " << part.offset << "), concurrent parts: " << part_map_.size() + 1
+              << ", unused resources: " << resource_state_.unused() << " bytes";
     resource_state_.start_use(static_cast<int64>(part.size));
 
     TRY_RESULT(query, start_part(part, parts_manager_.get_part_count(), parts_manager_.get_streaming_offset()));
@@ -625,12 +640,18 @@ Status FileDownloader::do_loop() {
     auto callback = actor_shared(this, unique_id);
     if (delay_dispatcher_.empty()) {
       G()->net_query_dispatcher().dispatch_with_callback(std::move(query), std::move(callback));
+      LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Part " << part.id << " dispatched directly (no delay)";
     } else {
       query->debug("sent to DelayDispatcher");
       send_closure(delay_dispatcher_, &DelayDispatcher::send_with_callback_and_delay, std::move(query),
                    std::move(callback), next_delay_);
+      LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Part " << part.id << " dispatched with delay: " << next_delay_ << "s";
       // More aggressive delay reduction for faster concurrent downloads
+      auto old_delay = next_delay_;
       next_delay_ = max(next_delay_ * 0.7, 0.001);
+      if (old_delay != next_delay_) {
+        LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Delay reduced from " << old_delay << "s to " << next_delay_ << "s";
+      }
     }
   }
   return Status::OK();
@@ -652,7 +673,9 @@ void FileDownloader::update_estimated_limit() {
   }
   auto estimated_extra = parts_manager_.get_estimated_extra();
   resource_state_.update_estimated_limit(estimated_extra);
-  VLOG(file_loader) << "Update estimated limit " << estimated_extra;
+  LOG(INFO) << "DOWNLOAD_OPTIMIZATION: Resource state updated - estimated extra: " << estimated_extra 
+            << ", active limit: " << resource_state_.active_limit() << ", unused: " << resource_state_.unused()
+            << ", active parts: " << part_map_.size();
   if (!resource_manager_.empty()) {
     // Keep file descriptor open more aggressively and allow more concurrent parts
     keep_fd_ =
