@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2025
+// Copyright Aliaksei Levin (levlam@telegram.org),  private:
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -53,9 +53,10 @@ class PartsManager {
   string get_bitmask();
 
  private:
-  static constexpr int MAX_PART_COUNT = 4000;
-  static constexpr int MAX_PART_COUNT_PREMIUM = 8000;
-  static constexpr size_t MAX_PART_SIZE = 512 << 10;
+  // Increased part counts for more parallel downloads
+  static constexpr int MAX_PART_COUNT = 8000;
+  static constexpr int MAX_PART_COUNT_PREMIUM = 16000;
+  static constexpr size_t MAX_PART_SIZE = 4096 << 10;
   static constexpr int64 MAX_FILE_SIZE = static_cast<int64>(MAX_PART_SIZE) * MAX_PART_COUNT_PREMIUM;
 
   enum class PartStatus : int32 { Empty, Pending, Ready };

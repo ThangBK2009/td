@@ -19,7 +19,8 @@ FileUploadManager::FileUploadManager(unique_ptr<Callback> callback, ActorShared<
 }
 
 void FileUploadManager::start_up() {
-  constexpr int64 MAX_UPLOAD_RESOURCE_LIMIT = 4 << 20;
+  // Increased upload resource limit for better upload performance: 16MB instead of 4MB
+  constexpr int64 MAX_UPLOAD_RESOURCE_LIMIT = 16 << 20;
   upload_resource_manager_ = create_actor<ResourceManager>(
       "UploadResourceManager", MAX_UPLOAD_RESOURCE_LIMIT,
       !G()->keep_media_order() ? ResourceManager::Mode::Greedy : ResourceManager::Mode::Baseline);

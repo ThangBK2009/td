@@ -151,7 +151,8 @@ Result<NetQueryPtr> FileDownloader::start_part(Part part, int32 part_count, int6
     bool cdn_supported = false;
 #if !TD_EMSCRIPTEN
     // CDN is supported, unless we use domains instead of IPs from a browser
-    if (streaming_offset == 0) {
+    // Enable CDN support more aggressively for better performance
+    if (streaming_offset == 0 || part.size >= 256 * 1024) {
       cdn_supported = true;
     }
 #endif
@@ -410,7 +411,8 @@ void FileDownloader::add_hash_info(const std::vector<telegram_api::object_ptr<te
 }
 
 void FileDownloader::try_release_fd() {
-  if (!keep_fd_ && !fd_.empty()) {
+  // Keep file descriptor open more aggressively to reduce open/close overhead
+  if (!keep_fd_ && !fd_.empty() && part_map_.empty()) {
     fd_.close();
   }
 }
@@ -546,8 +548,9 @@ void FileDownloader::start_up() {
        file_type == FileType::VideoStory || file_type == FileType::SelfDestructingVideo ||
        file_type == FileType::SelfDestructingVideoNote || file_type == FileType::SelfDestructingVoiceNote ||
        (file_type == FileType::Encrypted && size_ > (1 << 20)))) {
-    delay_dispatcher_ = create_actor<DelayDispatcher>("DelayDispatcher", 0.003, actor_shared(this, 1));
-    next_delay_ = 0.05;
+    // Reduced delay for faster downloads: 0.001 instead of 0.003, start delay 0.01 instead of 0.05
+    delay_dispatcher_ = create_actor<DelayDispatcher>("DelayDispatcher", 0.001, actor_shared(this, 1));
+    next_delay_ = 0.01;
   }
   resource_state_.set_unit_size(parts_manager_.get_part_size());
   update_estimated_limit();
@@ -602,7 +605,9 @@ Status FileDownloader::do_loop() {
   }
 
   while (true) {
-    if (resource_state_.unused() < narrow_cast<int64>(parts_manager_.get_part_size())) {
+    // Be more aggressive with resource usage - allow downloads even with smaller resource pools
+    auto part_size = narrow_cast<int64>(parts_manager_.get_part_size());
+    if (resource_state_.unused() < part_size / 2) {
       VLOG(file_loader) << "Receive only " << resource_state_.unused() << " resource";
       break;
     }
@@ -624,7 +629,8 @@ Status FileDownloader::do_loop() {
       query->debug("sent to DelayDispatcher");
       send_closure(delay_dispatcher_, &DelayDispatcher::send_with_callback_and_delay, std::move(query),
                    std::move(callback), next_delay_);
-      next_delay_ = max(next_delay_ * 0.8, 0.003);
+      // More aggressive delay reduction for faster concurrent downloads
+      next_delay_ = max(next_delay_ * 0.7, 0.001);
     }
   }
   return Status::OK();
@@ -648,7 +654,9 @@ void FileDownloader::update_estimated_limit() {
   resource_state_.update_estimated_limit(estimated_extra);
   VLOG(file_loader) << "Update estimated limit " << estimated_extra;
   if (!resource_manager_.empty()) {
-    keep_fd_ = narrow_cast<uint64>(resource_state_.active_limit()) >= parts_manager_.get_part_size();
+    // Keep file descriptor open more aggressively and allow more concurrent parts
+    keep_fd_ =
+        narrow_cast<uint64>(resource_state_.active_limit()) >= parts_manager_.get_part_size() || part_map_.size() > 2;
     try_release_fd();
     send_closure(resource_manager_, &ResourceManager::update_resources, resource_state_);
   }

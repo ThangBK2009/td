@@ -87,7 +87,8 @@ Status PartsManager::init_no_size(size_t part_size, const std::vector<int> &read
   if (part_size != 0) {
     part_size_ = part_size;
   } else {
-    part_size_ = 32 << 10;
+    // Start with larger part size for better performance: 128KB instead of 32KB for unknown sizes
+    part_size_ = 256 << 10;
     while (part_size_ < MAX_PART_SIZE && calc_part_count(expected_size_, part_size_) > MAX_PART_COUNT) {
       part_size_ *= 2;
     }
@@ -129,7 +130,8 @@ Status PartsManager::init(int64 size, int64 expected_size, bool is_size_final, s
       return Status::Error("FILE_UPLOAD_RESTART");
     }
   } else {
-    part_size_ = 64 << 10;
+    // Start with larger part size for better performance: 256KB instead of 64KB
+    part_size_ = 256 << 10;
     while (part_size_ < MAX_PART_SIZE && calc_part_count(expected_size_, part_size_) > MAX_PART_COUNT) {
       part_size_ *= 2;
     }
@@ -280,7 +282,8 @@ Result<Part> PartsManager::start_part() {
   if (part_id == part_count_) {
     if (unknown_size_flag_) {
       part_count_++;
-      if (part_count_ > MAX_PART_COUNT_PREMIUM + (use_part_count_limit_ ? 0 : 64)) {
+      // Allow more parts for unknown size files to increase parallelism (256 extra parts instead of 64)
+      if (part_count_ > MAX_PART_COUNT_PREMIUM + (use_part_count_limit_ ? 0 : 256)) {
         if (!is_upload_) {
           // Caller will try to increase part size if it is possible
           return Status::Error("FILE_DOWNLOAD_RESTART_INCREASE_PART_SIZE");

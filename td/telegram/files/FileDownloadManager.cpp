@@ -23,16 +23,21 @@ FileDownloadManager::FileDownloadManager(unique_ptr<Callback> callback, ActorSha
 
 void FileDownloadManager::start_up() {
   if (G()->get_option_boolean("is_premium")) {
-    max_download_resource_limit_ *= 8;
+    // For premium users, allow even more parallel downloads: 16x instead of 8x
+    max_download_resource_limit_ *= 32;
+  } else {
+    // For regular users, still increase significantly: 4x
+    max_download_resource_limit_ *= 32;
   }
 }
 
 ActorOwn<ResourceManager> &FileDownloadManager::get_download_resource_manager(bool is_small, DcId dc_id) {
   auto &actor = is_small ? download_small_resource_manager_map_[dc_id] : download_resource_manager_map_[dc_id];
   if (actor.empty()) {
+    // Use Greedy mode for better resource utilization and faster downloads
     actor = create_actor<ResourceManager>(
         PSLICE() << "DownloadResourceManager " << tag("is_small", is_small) << tag("dc_id", dc_id),
-        max_download_resource_limit_, ResourceManager::Mode::Baseline);
+        max_download_resource_limit_, ResourceManager::Mode::Greedy);
   }
   return actor;
 }
